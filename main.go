@@ -23,7 +23,9 @@ func main() {
 		MinIdelNum: 10,
 		New: func() (interface{}, error) {
 			obj := &TestObj{sum}
-			fmt.Println("object:", obj.num, " create")
+			var num int = 0
+			var dev int = 0
+			fmt.Println("object:", obj.num, " create", num/dev)
 			return obj, nil
 		},
 		Destroy: func(obj interface{}) error {

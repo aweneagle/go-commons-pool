@@ -24,7 +24,7 @@ type Options struct {
 	Validate func(obj interface{}) (err error)
 }
 
-type Pool struct {
+type pool struct {
 	pool chan interface{}
 
 	idelNum  int32
@@ -33,8 +33,8 @@ type Pool struct {
 	options Options
 }
 
-func New(opt Options) *Pool {
-	p := &Pool{
+func New(opt Options) *pool {
+	p := &pool{
 		pool:     make(chan interface{}, opt.PoolSize),
 		idelNum:  0,
 		totalNum: 0,
@@ -43,31 +43,31 @@ func New(opt Options) *Pool {
 	return p
 }
 
-func (p *Pool) Borrow() (interface{}, error) {
+func (p *pool) Borrow() (interface{}, error) {
 	obj := <-p.pool
 	atomic.AddInt32(&p.idelNum, -1)
 	return obj, nil
 }
 
-func (p *Pool) Return(obj interface{}) {
+func (p *pool) Return(obj interface{}) {
 	p.pool <- obj
 	atomic.AddInt32(&p.idelNum, 1)
 }
 
-func (p *Pool) Destroy(obj interface{}) error {
+func (p *pool) Destroy(obj interface{}) error {
 	atomic.AddInt32(&p.totalNum, -1)
 	return p.options.Destroy(obj)
 }
 
-func (p *Pool) GetTotalNum() int32 {
+func (p *pool) GetTotalNum() int32 {
 	return p.totalNum
 }
 
-func (p *Pool) GetIdelNum() int32 {
+func (p *pool) GetIdelNum() int32 {
 	return p.idelNum
 }
 
-func (p *Pool) inc() error {
+func (p *pool) inc() error {
 	var total int32 = atomic.AddInt32(&p.totalNum, 1)
 	if total > p.options.PoolSize {
 		atomic.AddInt32(&p.totalNum, -1)
@@ -76,7 +76,7 @@ func (p *Pool) inc() error {
 	return nil
 }
 
-func (p *Pool) dec() error {
+func (p *pool) dec() error {
 	var total int32 = atomic.AddInt32(&p.totalNum, -1)
 	if total < 0 {
 		atomic.AddInt32(&p.totalNum, 1)
@@ -85,7 +85,7 @@ func (p *Pool) dec() error {
 	return nil
 }
 
-func (p *Pool) Serve() {
+func (p *pool) Serve() {
 	//1. when idelNum < MinIdelNum, auto increase number of objs
 	go func() {
 		for {
@@ -96,7 +96,12 @@ func (p *Pool) Serve() {
 					if err := p.inc(); err == nil {
 						go func() {
 							if obj, err := opt.New(); err != nil {
-								p.dec()
+								for {
+									//p.desc() must be succefully done, because we already "consume" a pit of pool by p.inc()
+									if fail2desc := p.dec(); fail2desc == nil {
+										break
+									}
+								}
 							} else {
 								p.Return(obj)
 							}
@@ -105,7 +110,6 @@ func (p *Pool) Serve() {
 				}
 			}
 			time.Sleep(10 * time.Millisecond)
-			//time.Sleep(10 * time.Second)
 		}
 	}()
 	//2. when idelNum > MaxIdelNum, auto decrease number of objs
@@ -122,7 +126,6 @@ func (p *Pool) Serve() {
 				}
 			}
 			time.Sleep(10 * time.Millisecond)
-			//time.Sleep(10 * time.Second)
 		}
 	}()
 }
