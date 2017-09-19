@@ -9,6 +9,7 @@ import (
 var ErrorPoolIsFull error = errors.New("pool is full")
 var ErrorPoolIsEmpty error = errors.New("pool is empty")
 var ErrorOptions error = errors.New("wrong options")
+var ErrorTimeout error = errors.New("timeout")
 
 type Options struct {
 	// PoolSize > MaxIdelNum > MinIdelNum
@@ -24,7 +25,7 @@ type Options struct {
 	Validate func(obj interface{}) (err error)
 }
 
-type pool struct {
+type Pool struct {
 	pool chan interface{}
 
 	idelNum  int32
@@ -33,8 +34,8 @@ type pool struct {
 	options Options
 }
 
-func New(opt Options) *pool {
-	p := &pool{
+func New(opt Options) *Pool {
+	p := &Pool{
 		pool:     make(chan interface{}, opt.PoolSize),
 		idelNum:  0,
 		totalNum: 0,
@@ -44,31 +45,43 @@ func New(opt Options) *pool {
 	return p
 }
 
-func (p *pool) Borrow() (interface{}, error) {
-	obj := <-p.pool
-	atomic.AddInt32(&p.idelNum, -1)
-	return obj, nil
+func (p *Pool) Borrow() (interface{}, error) {
+	if p.GetActivateNum() >= p.GetTotalNum() {
+		return nil, ErrorPoolIsFull
+	}
+	select {
+	case obj := <-p.pool:
+		atomic.AddInt32(&p.idelNum, -1)
+		return obj, nil
+
+	case <-time.After(10 * time.Millisecond):
+		return nil, ErrorTimeout
+	}
 }
 
-func (p *pool) Return(obj interface{}) {
+func (p *Pool) Return(obj interface{}) {
 	p.pool <- obj
 	atomic.AddInt32(&p.idelNum, 1)
 }
 
-func (p *pool) Destroy(obj interface{}) error {
+func (p *Pool) Destroy(obj interface{}) error {
 	atomic.AddInt32(&p.totalNum, -1)
 	return p.options.Destroy(obj)
 }
 
-func (p *pool) GetTotalNum() int32 {
+func (p *Pool) GetTotalNum() int32 {
 	return p.totalNum
 }
 
-func (p *pool) GetIdelNum() int32 {
+func (p *Pool) GetIdelNum() int32 {
 	return p.idelNum
 }
 
-func (p *pool) inc() error {
+func (p *Pool) GetActivateNum() int32 {
+	return p.totalNum - p.idelNum
+}
+
+func (p *Pool) inc() error {
 	var total int32 = atomic.AddInt32(&p.totalNum, 1)
 	if total > p.options.PoolSize {
 		atomic.AddInt32(&p.totalNum, -1)
@@ -77,7 +90,7 @@ func (p *pool) inc() error {
 	return nil
 }
 
-func (p *pool) dec() error {
+func (p *Pool) dec() error {
 	var total int32 = atomic.AddInt32(&p.totalNum, -1)
 	if total < 0 {
 		atomic.AddInt32(&p.totalNum, 1)
@@ -86,7 +99,7 @@ func (p *pool) dec() error {
 	return nil
 }
 
-func (p *pool) serve() {
+func (p *Pool) serve() {
 	//1. when idelNum < MinIdelNum, auto increase number of objs
 	go func() {
 		for {
@@ -97,12 +110,7 @@ func (p *pool) serve() {
 					if err := p.inc(); err == nil {
 						go func() {
 							if obj, err := opt.New(); err != nil {
-								for {
-									//p.desc() must be succefully done, because we already "consume" a pit of pool by p.inc()
-									if fail2desc := p.dec(); fail2desc == nil {
-										break
-									}
-								}
+								p.dec()
 							} else {
 								p.Return(obj)
 							}
