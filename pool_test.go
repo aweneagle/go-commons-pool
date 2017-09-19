@@ -33,14 +33,14 @@ func destroy(obj interface{}) error {
 
 func TestPoolMain(t *testing.T) {
 	sum = 0
-	p := New(Options{
+	p, _ := New(Options{
 		PoolSize:   1000,
 		MaxIdelNum: 30,
 		MinIdelNum: 10,
 		New:        create,
 		Destroy:    destroy,
 	})
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(15 * time.Millisecond)
 	n, err := p.Borrow()
 	assert(err == nil, "something wrong when borrow", t, p)
 	assert(n.(*TestObj).num == 1, "the first num should be 1", t, p)
@@ -64,7 +64,7 @@ func TestPoolMain(t *testing.T) {
  */
 func TestPoolMinSize(t *testing.T) {
 	sum = 0
-	p := New(Options{
+	p, _ := New(Options{
 		PoolSize:   3,
 		MaxIdelNum: 2,
 		MinIdelNum: 1,

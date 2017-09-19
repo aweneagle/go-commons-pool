@@ -32,9 +32,10 @@ type Pool struct {
 	totalNum int32
 
 	options Options
+	lastErr atomic.Value
 }
 
-func New(opt Options) *Pool {
+func New(opt Options) (*Pool, error) {
 	p := &Pool{
 		pool:     make(chan interface{}, opt.PoolSize),
 		idelNum:  0,
@@ -42,7 +43,7 @@ func New(opt Options) *Pool {
 		options:  opt,
 	}
 	p.serve()
-	return p
+	return p, nil
 }
 
 func (p *Pool) Borrow() (interface{}, error) {
@@ -90,6 +91,15 @@ func (p *Pool) inc() error {
 	return nil
 }
 
+func (p *Pool) setLastError(err interface{}) {
+	p.lastErr.Store(err)
+}
+
+func (p *Pool) GetLastError() error {
+	e := p.lastErr.Load()
+	return e.(error)
+}
+
 func (p *Pool) dec() error {
 	var total int32 = atomic.AddInt32(&p.totalNum, -1)
 	if total < 0 {
@@ -109,7 +119,15 @@ func (p *Pool) serve() {
 				for ; need > 0; need-- {
 					if err := p.inc(); err == nil {
 						go func() {
+							defer func() {
+								if r := recover(); r != nil {
+									p.setLastError(r)
+									// @todo collect error info and recover from panic
+									p.dec()
+								}
+							}()
 							if obj, err := opt.New(); err != nil {
+								p.setLastError(err)
 								p.dec()
 							} else {
 								p.Return(obj)
@@ -130,7 +148,15 @@ func (p *Pool) serve() {
 				for ; noneed > 0; noneed-- {
 					obj, _ := p.Borrow()
 					if obj != nil {
-						go p.Destroy(obj)
+						go func() {
+							defer func() {
+								if r := recover(); r != nil {
+									p.setLastError(r)
+									// @todo collect error info and recover from panic
+								}
+							}()
+							p.Destroy(obj)
+						}()
 					}
 				}
 			}
