@@ -3,29 +3,25 @@ package main
 import (
 	"./pool"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
-var sum int
+var sum int32
 
 type TestObj struct {
-	num int
+	num int32
 }
 
 func main() {
-	go func() {
-		sum++
-		time.Sleep(1 * time.Second)
-	}()
 	p := pool.New(pool.Options{
 		PoolSize:   1000,
 		MaxIdelNum: 30,
 		MinIdelNum: 10,
 		New: func() (interface{}, error) {
-			obj := &TestObj{sum}
-			var num int = 0
-			var dev int = 0
-			fmt.Println("object:", obj.num, " create", num/dev)
+			total := atomic.AddInt32(&sum, 1)
+			obj := &TestObj{total}
+			fmt.Println("object:", obj.num, " create")
 			return obj, nil
 		},
 		Destroy: func(obj interface{}) error {
@@ -33,7 +29,6 @@ func main() {
 			return nil
 		},
 	})
-	p.Serve()
 	var test = func(x int64) {
 		c, _ := p.Borrow()
 		fmt.Println(x, "] object:", c.(*TestObj).num, " borrow out, total:", p.GetTotalNum(), ",idel:", p.GetIdelNum())

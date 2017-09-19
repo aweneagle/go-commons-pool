@@ -40,6 +40,7 @@ func New(opt Options) *pool {
 		totalNum: 0,
 		options:  opt,
 	}
+	p.serve()
 	return p
 }
 
@@ -85,7 +86,7 @@ func (p *pool) dec() error {
 	return nil
 }
 
-func (p *pool) Serve() {
+func (p *pool) serve() {
 	//1. when idelNum < MinIdelNum, auto increase number of objs
 	go func() {
 		for {
