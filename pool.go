@@ -1,153 +1,178 @@
-package main
+package pool
 
 import (
 	"errors"
-	"fmt"
 	"sync/atomic"
 	"time"
 )
 
+var ErrorPoolIsFull error = errors.New("pool is full")
+var ErrorPoolIsEmpty error = errors.New("pool is empty")
+var ErrorOptions error = errors.New("wrong options")
+var ErrorTimeout error = errors.New("timeout")
+
 type ObjFactory interface {
+	// New, Destroy is Required, can't be nil
 	New() (interface{}, error)
 	Destroy(obj interface{}) error
+
+	// Validate is Optional
+	Validate(obj interface{}) error
 }
 
-const (
-	ErrorPoolIsFull error = errors.New("Pool Is Full")
-)
+type Options struct {
+	// PoolSize > MaxIdelNum > MinIdelNum
+	PoolSize   int32
+	MaxIdelNum int32
+	MinIdelNum int32
+
+	Factory ObjFactory
+}
 
 type Pool struct {
-	Factory ObjFactory
-	OnError func(error)
-	Size    int32
-	MinIdle int32
-	idel    int32
-	total   int32
-
-	//对象数量不足时，通知对象池需要增加对象了
-	more chan int
-
-	//对象需要销毁时，通知对象池删除
-	less chan int
-
-	//新增的对象
-	new chan interface{}
-
-	//对象池
 	pool chan interface{}
+
+	idelNum  int32
+	totalNum int32
+	options  Options
+	serving  bool
 }
 
-func (p *pool) Serve() error {
-	if p.Size < 0 {
-		return errors.New(fmt.Sprintf("wrong pool size:%d", p.Size))
+func New(opt Options) *Pool {
+	p := &Pool{
+		pool:     make(chan interface{}, opt.PoolSize),
+		idelNum:  0,
+		totalNum: 0,
+		options:  opt,
+		serving:  false,
 	}
-	if p.MinIdle < 0 {
-		return errors.New(fmt.Sprintf("wrong pool MinIdle:%d", p.MinIdle))
-	}
-	if p.Factory == nil {
-		return errors.New("Pool.Facatory is missing")
-	}
-	if p.MinIdle == 0 {
-		p.MinIdle = 32 //默认32
-	}
-	if p.Size == 0 {
-		p.Size = 1024 //默认1024
-	}
-	p.more = make(chan int, p.Size)
-	p.less = make(chan int, 1)
-	p.pool = make(chan interface{}, p.Size)
-	p.new = make(chan interface{}, p.Size)
-	p.total, p.idel = 0
-
-	//接到“新增对象”的通知
-	go func() {
-		for {
-			num := <-p.more
-			go func() {
-				if err := p.Add(num); err != nil {
-					p.OnError(err)
-				}
-			}()
-		}
-	}()
-
-	//对象增加
-	go func() {
-		for {
-			obj := <-p.new
-			if p.total >= p.Size {
-				go func() {
-					err := p.Factory.Destroy(obj)
-					if p.OnError != nil {
-						p.OnError(err)
-					}
-				}()
-				p.OnError(ErrorPoolIsFull)
-			} else {
-				p.total++
-				atomic.AddInt32(&p.idle, 1)
-				p.pool <- obj
-			}
-		}
-	}()
-
-	//对象销毁，更新total数
-	go func() {
-		for {
-			less := <-p.less
-			p.total -= less
-		}
-	}()
-
-	//自动调节对象个数
-	go func() {
-		for {
-			time.Sleep(10 * time.Second)
-			todec := int(p.idle - p.MaxIdle)
-			toinc := int(p.MinIdle - p.idle)
-			//最多MaxIdle个空闲，超过的减去
-			for i := 0; i < toinc; i++ {
-				if err := p.Destroy(p.Borrow()); err != nil {
-					p.OnError(err)
-				}
-			}
-			//最少MinIdle个空闲，不够的补上
-			for i := 0; i < todec; i++ {
-				if err := p.Add(1); err != nil {
-					p.OnError(err)
-				}
-			}
-		}
-	}()
-
-	return nil
+	return p
 }
 
-func (p *Pool) Destroy(obj interface{}) error {
-	p.less <- 1
-	return p.Factory.Destroy(obj)
-}
-
-func (p *Pool) Add(num int) error {
-	for i := 0; i < num; i++ {
-		obj, err := p.Factory.New()
+/*
+* Add() is not thread safe
+ */
+func (p *Pool) Add(num int32) error {
+	if num > p.options.PoolSize-p.totalNum {
+		return errors.New("too many object to add")
+	}
+	var i int32
+	for i = 0; i < num; i++ {
+		obj, err := p.options.Factory.New()
 		if err != nil {
 			return err
 		}
-		p.new <- obj
+		p.pool <- obj
+		atomic.AddInt32(&p.idelNum, 1)
+		atomic.AddInt32(&p.totalNum, 1)
 	}
 	return nil
 }
 
-func (p *Pool) Borrow() interface{} {
-	atomic.AddInt32(&p.idle, -1)
-	if p.idle < 0 {
-		p.more <- 1
+func (p *Pool) Borrow() (interface{}, error) {
+	if p.GetActivateNum() >= p.GetTotalNum() {
+		return nil, ErrorPoolIsEmpty
 	}
-	return <-p.pool
+	select {
+	case obj := <-p.pool:
+		atomic.AddInt32(&p.idelNum, -1)
+		return obj, nil
+
+	case <-time.After(10 * time.Millisecond):
+		return nil, ErrorTimeout
+	}
 }
 
 func (p *Pool) Return(obj interface{}) {
-	atomic.AddInt32(&p.idle, 1)
 	p.pool <- obj
+	atomic.AddInt32(&p.idelNum, 1)
+}
+
+func (p *Pool) Destroy(obj interface{}) error {
+	atomic.AddInt32(&p.totalNum, -1)
+	return p.options.Factory.Destroy(obj)
+}
+
+func (p *Pool) Clean() {
+	for toclean := p.totalNum; toclean > 0; toclean-- {
+		if obj, _ := p.Borrow(); obj != nil {
+			p.Destroy(obj)
+		}
+	}
+}
+
+func (p *Pool) GetTotalNum() int32 {
+	return p.totalNum
+}
+
+func (p *Pool) GetIdelNum() int32 {
+	return p.idelNum
+}
+
+func (p *Pool) GetActivateNum() int32 {
+	return p.totalNum - p.idelNum
+}
+
+func (p *Pool) inc() error {
+	var total int32 = atomic.AddInt32(&p.totalNum, 1)
+	if total > p.options.PoolSize {
+		atomic.AddInt32(&p.totalNum, -1)
+		return ErrorPoolIsFull
+	}
+	return nil
+}
+
+func (p *Pool) dec() error {
+	var total int32 = atomic.AddInt32(&p.totalNum, -1)
+	if total < 0 {
+		atomic.AddInt32(&p.totalNum, 1)
+		return ErrorPoolIsEmpty
+	}
+	return nil
+}
+
+func (p *Pool) Serve() {
+	if p.serving == true {
+		return
+	}
+	p.serving = true
+	//1. when idelNum < MinIdelNum, auto increase number of objs
+	go func() {
+		for {
+			var opt = p.options
+			if opt.MinIdelNum > p.idelNum {
+				var need int32 = (opt.MinIdelNum+opt.MaxIdelNum)/2 - p.idelNum
+				for ; need > 0; need-- {
+					if err := p.inc(); err == nil {
+						go func() {
+							if obj, err := opt.Factory.New(); err != nil {
+								p.dec()
+							} else {
+								p.Return(obj)
+							}
+						}()
+					}
+				}
+			}
+			//每秒检查一下是否需要更新对象池
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	//2. when idelNum > MaxIdelNum, auto decrease number of objs
+	go func() {
+		for {
+			var opt = p.options
+			var noneed int32 = p.idelNum - opt.MaxIdelNum
+			if noneed > 0 {
+				for ; noneed > 0; noneed-- {
+					obj, _ := p.Borrow()
+					if obj != nil {
+						go p.Destroy(obj)
+					}
+				}
+			}
+			//每秒检查一下是否需要更新对象池
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 }
