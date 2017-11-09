@@ -11,18 +11,22 @@ var ErrorPoolIsEmpty error = errors.New("pool is empty")
 var ErrorOptions error = errors.New("wrong options")
 var ErrorTimeout error = errors.New("timeout")
 
+type ObjFactory interface {
+	// New, Destroy is Required, can't be nil
+	New() (interface{}, error)
+	Destroy(obj interface{}) error
+
+	// Validate is Optional
+	Validate(obj interface{}) error
+}
+
 type Options struct {
 	// PoolSize > MaxIdelNum > MinIdelNum
 	PoolSize   int32
 	MaxIdelNum int32
 	MinIdelNum int32
 
-	// New, Destroy is Required, can't be nil
-	New     func() (obj interface{}, err error)
-	Destroy func(obj interface{}) (err error)
-
-	// Validate is Optional
-	Validate func(obj interface{}) (err error)
+	Factory ObjFactory
 }
 
 type Pool struct {
@@ -30,25 +34,44 @@ type Pool struct {
 
 	idelNum  int32
 	totalNum int32
-
-	options Options
-	lastErr atomic.Value
+	options  Options
+	serving  bool
 }
 
-func New(opt Options) (*Pool, error) {
+func New(opt Options) *Pool {
 	p := &Pool{
 		pool:     make(chan interface{}, opt.PoolSize),
 		idelNum:  0,
 		totalNum: 0,
 		options:  opt,
+		serving:  false,
 	}
-	p.serve()
-	return p, nil
+	return p
+}
+
+/*
+* Add() is not thread safe
+ */
+func (p *Pool) Add(num int32) error {
+	if num > p.options.PoolSize-p.totalNum {
+		return errors.New("too many object to add")
+	}
+	var i int32
+	for i = 0; i < num; i++ {
+		obj, err := p.options.Factory.New()
+		if err != nil {
+			return err
+		}
+		p.pool <- obj
+		atomic.AddInt32(&p.idelNum, 1)
+		atomic.AddInt32(&p.totalNum, 1)
+	}
+	return nil
 }
 
 func (p *Pool) Borrow() (interface{}, error) {
 	if p.GetActivateNum() >= p.GetTotalNum() {
-		return nil, ErrorPoolIsFull
+		return nil, ErrorPoolIsEmpty
 	}
 	select {
 	case obj := <-p.pool:
@@ -67,7 +90,15 @@ func (p *Pool) Return(obj interface{}) {
 
 func (p *Pool) Destroy(obj interface{}) error {
 	atomic.AddInt32(&p.totalNum, -1)
-	return p.options.Destroy(obj)
+	return p.options.Factory.Destroy(obj)
+}
+
+func (p *Pool) Clean() {
+	for toclean := p.totalNum; toclean > 0; toclean-- {
+		if obj, _ := p.Borrow(); obj != nil {
+			p.Destroy(obj)
+		}
+	}
 }
 
 func (p *Pool) GetTotalNum() int32 {
@@ -91,15 +122,6 @@ func (p *Pool) inc() error {
 	return nil
 }
 
-func (p *Pool) setLastError(err interface{}) {
-	p.lastErr.Store(err)
-}
-
-func (p *Pool) GetLastError() error {
-	e := p.lastErr.Load()
-	return e.(error)
-}
-
 func (p *Pool) dec() error {
 	var total int32 = atomic.AddInt32(&p.totalNum, -1)
 	if total < 0 {
@@ -109,7 +131,11 @@ func (p *Pool) dec() error {
 	return nil
 }
 
-func (p *Pool) serve() {
+func (p *Pool) Serve() {
+	if p.serving == true {
+		return
+	}
+	p.serving = true
 	//1. when idelNum < MinIdelNum, auto increase number of objs
 	go func() {
 		for {
@@ -119,15 +145,7 @@ func (p *Pool) serve() {
 				for ; need > 0; need-- {
 					if err := p.inc(); err == nil {
 						go func() {
-							defer func() {
-								if r := recover(); r != nil {
-									p.setLastError(r)
-									// @todo collect error info and recover from panic
-									p.dec()
-								}
-							}()
-							if obj, err := opt.New(); err != nil {
-								p.setLastError(err)
+							if obj, err := opt.Factory.New(); err != nil {
 								p.dec()
 							} else {
 								p.Return(obj)
@@ -136,6 +154,7 @@ func (p *Pool) serve() {
 					}
 				}
 			}
+			//每秒检查一下是否需要更新对象池
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -148,18 +167,11 @@ func (p *Pool) serve() {
 				for ; noneed > 0; noneed-- {
 					obj, _ := p.Borrow()
 					if obj != nil {
-						go func() {
-							defer func() {
-								if r := recover(); r != nil {
-									p.setLastError(r)
-									// @todo collect error info and recover from panic
-								}
-							}()
-							p.Destroy(obj)
-						}()
+						go p.Destroy(obj)
 					}
 				}
 			}
+			//每秒检查一下是否需要更新对象池
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
