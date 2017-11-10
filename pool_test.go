@@ -21,18 +21,29 @@ func assert(assert bool, msg string, t *testing.T, p *Pool) {
 	}
 }
 
-func create() (interface{}, error) {
+type Fact struct {
+}
+
+func (f Fact) New() (interface{}, error) {
 	total := atomic.AddInt32(&sum, 1)
 	obj := &TestObj{total}
 	return obj, nil
 }
 
-func destroy(obj interface{}) error {
+func (f Fact) Destroy(obj interface{}) error {
 	return nil
 }
 
 func TestPoolMain(t *testing.T) {
 	sum = 0
+	p := Pool{
+		Size:       1000,
+		MinIdelNum: 10,
+		MaxIdelNum: 100,
+		Factory:    Fact{},
+	}
+	p.Serve()
+
 	p, _ := New(Options{
 		PoolSize:   1000,
 		MaxIdelNum: 30,
