@@ -43,6 +43,10 @@ type Pool struct {
 }
 
 func (p *Pool) Serve() error {
+	//pool != nil 说明已经初始化过了
+	if p.pool != nil {
+		return nil
+	}
 	if p.Size < 0 {
 		return errors.New(fmt.Sprintf("wrong pool size:%d", p.Size))
 	}
@@ -121,6 +125,9 @@ func (p *Pool) Destroy(obj interface{}) error {
 }
 
 func (p *Pool) Add(num int) error {
+	if err := p.Serve(); err != nil {
+		return err
+	}
 	for i := 0; i < num; i++ {
 		obj, err := p.Factory.New()
 		if err != nil {
