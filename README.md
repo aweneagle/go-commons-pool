@@ -1,5 +1,7 @@
 # go-commons-pool
 
+该对象池会自动调节池中的对象数量，当池中对象不够用时，自动添加； 当池中对象富余过多时，自动减少
+
 使用示例：
 
 1. 加载库
@@ -16,13 +18,11 @@ type Fact struct {
 }
 
 func (f Fact) New() (interface{}, error) {
-	total := atomic.AddInt32(&sum, 1)
-	obj := &TestObj{total}
-	return obj, nil
+      //生成新对象
 }
 
 func (f Fact) Destroy(obj interface{}) error {
-	return nil
+     //销毁无效对象
 }
 ```
 
