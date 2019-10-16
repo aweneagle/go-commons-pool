@@ -29,6 +29,7 @@ type Pool struct {
 	idle    int32
 	total   int32
 
+	//just for test
 	//对象数量不足时，通知对象池需要增加对象了
 	more chan int
 
